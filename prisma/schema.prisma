@@ -1,0 +1,348 @@
+// LeadFlow AI — Prisma Schema
+// Run: npx prisma migrate dev --name init
+// DB:  PostgreSQL (recommended: Supabase or Railway)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Tenant (Multi-tenant workspace) ─────────────────────────────────────────
+model Tenant {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  plan        String   @default("starter") // starter | growth | agency
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  users        User[]
+  icps         ICP[]
+  leads        Lead[]
+  campaigns    Campaign[]
+  messages     OutreachMessage[]
+  replies      Reply[]
+  suppressed   SuppressedEmail[]
+}
+
+// ─── User ─────────────────────────────────────────────────────────────────────
+model User {
+  id          String   @id @default(uuid())
+  tenantId    String
+  name        String
+  email       String   @unique
+  password    String?  // hashed
+  role        String   @default("member") // owner | admin | member | viewer
+  avatar      String?
+  timezone    String   @default("UTC")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tenant       Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+// ─── ICP (Ideal Customer Profile) ─────────────────────────────────────────────
+model ICP {
+  id                  String   @id @default(uuid())
+  tenantId            String
+  name                String
+  industry            String[] // array of industries
+  businessType        String   // B2B | B2C | D2C | Both
+  companySizeMin      Int
+  companySizeMax      Int
+  geography           String[]
+  decisionMakerRoles  String[]
+  revenueRange        String?
+  techStack           String[]
+  keywords            String[]
+  aiSummary           String?  // AI-generated ICP summary
+  painPoints          String[]
+  messagingAngles     String[]
+  qualificationQs     String[]
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  tenant      Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  campaigns   Campaign[]
+  leads       Lead[]
+
+  @@index([tenantId])
+}
+
+// ─── Lead ─────────────────────────────────────────────────────────────────────
+model Lead {
+  id            String   @id @default(uuid())
+  tenantId      String
+  icpId         String?
+  campaignId    String?
+
+  // Contact info
+  businessName  String
+  contactName   String
+  jobTitle      String
+  email         String
+  phone         String?
+  website       String?
+  linkedin      String?
+  instagram     String?
+
+  // Classification
+  industry      String
+  companySize   String?
+  location      String
+  country       String
+  source        String   // linkedin | instagram | google | directory | manual
+
+  // Scoring
+  temperature   String   @default("cold") // hot | warm | cold
+  score         Int      @default(0)      // 0-100 LQS
+
+  // Score breakdown (stored as JSON)
+  scoreBreakdown Json?
+
+  // Status
+  status        String   @default("discovered")
+  // discovered | qualified | contacted | replied | converted | disqualified
+
+  // Metadata
+  tags          String[]
+  notes         String?
+  enrichmentData Json?
+
+  // Timestamps
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+  lastContactedAt   DateTime?
+  replyReceivedAt   DateTime?
+  convertedAt       DateTime?
+
+  tenant    Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  icp       ICP?       @relation(fields: [icpId], references: [id])
+  campaign  Campaign?  @relation(fields: [campaignId], references: [id])
+  messages  OutreachMessage[]
+  replies   Reply[]
+
+  @@index([tenantId])
+  @@index([tenantId, temperature])
+  @@index([tenantId, status])
+  @@index([tenantId, score])
+  @@index([email])
+}
+
+// ─── Campaign ─────────────────────────────────────────────────────────────────
+model Campaign {
+  id            String   @id @default(uuid())
+  tenantId      String
+  icpId         String
+
+  name          String
+  description   String?
+  status        String   @default("draft") // draft | active | paused | completed
+  channels      String[]  // email | linkedin | instagram
+
+  // Targeting
+  targetLeadCount   Int     @default(100)
+  leadsEnrolled     Int     @default(0)
+  leadsContacted    Int     @default(0)
+  repliesReceived   Int     @default(0)
+  positiveReplies   Int     @default(0)
+  appointmentsBooked Int    @default(0)
+
+  // Schedule
+  sendWindowStart   String  @default("09:00")
+  sendWindowEnd     String  @default("17:00")
+  timezone          String  @default("UTC")
+  sendDays          String[] @default(["Mon","Tue","Wed","Thu","Fri"])
+
+  // Stats (JSON for flexibility)
+  stats         Json?   // { sent, opened, clicked, replied, unsubscribed, bounced }
+
+  tags          String[]
+  startDate     DateTime?
+  endDate       DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  icp       ICP       @relation(fields: [icpId], references: [id])
+  leads     Lead[]
+  steps     CampaignStep[]
+  messages  OutreachMessage[]
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+}
+
+// ─── Campaign Step ─────────────────────────────────────────────────────────────
+model CampaignStep {
+  id               String   @id @default(uuid())
+  campaignId       String
+  stepNumber       Int
+  channel          String   // email | linkedin | instagram
+  dayOffset        Int      // days after start
+  subject          String?  // email subject line
+  messageTemplate  String   @db.Text
+  aiPersonalized   Boolean  @default(true)
+  triggerCondition String   @default("no_reply") // always | no_reply | no_open
+  createdAt        DateTime @default(now())
+
+  campaign  Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  messages  OutreachMessage[]
+
+  @@index([campaignId])
+}
+
+// ─── Outreach Message ─────────────────────────────────────────────────────────
+model OutreachMessage {
+  id           String   @id @default(uuid())
+  tenantId     String
+  leadId       String
+  campaignId   String
+  stepId       String?
+
+  channel      String   // email | linkedin | instagram
+  subject      String?
+  body         String   @db.Text
+  status       String   @default("pending")
+  // pending | scheduled | sent | opened | clicked | replied | bounced | failed
+
+  stepNumber   Int
+  aiGenerated  Boolean  @default(true)
+  personalizationSignals String[]
+  aiConfidence Float?
+
+  scheduledAt  DateTime?
+  sentAt       DateTime?
+  openedAt     DateTime?
+  clickedAt    DateTime?
+  repliedAt    DateTime?
+  bouncedAt    DateTime?
+
+  // Email-specific metadata
+  messageId    String?  // SMTP message-id for tracking
+  threadId     String?  // Gmail thread ID
+
+  createdAt    DateTime @default(now())
+
+  tenant    Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  lead      Lead           @relation(fields: [leadId], references: [id])
+  campaign  Campaign       @relation(fields: [campaignId], references: [id])
+  step      CampaignStep?  @relation(fields: [stepId], references: [id])
+  replies   Reply[]
+
+  @@index([tenantId])
+  @@index([leadId])
+  @@index([campaignId])
+  @@index([status])
+  @@index([scheduledAt])
+}
+
+// ─── Reply ─────────────────────────────────────────────────────────────────────
+model Reply {
+  id          String   @id @default(uuid())
+  tenantId    String
+  messageId   String
+  leadId      String
+  campaignId  String
+
+  channel     String   // email | linkedin | instagram
+  body        String   @db.Text
+
+  // AI Classification
+  classification     String   // interested | not_interested | neutral | ooo | referral
+  confidence         Float
+  aiSuggestedResponse String? @db.Text
+
+  // Human response
+  humanApproved      Boolean  @default(false)
+  approvedResponseBody String? @db.Text
+  respondedAt        DateTime?
+  respondedByUserId  String?
+
+  isRead      Boolean  @default(false)
+  receivedAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+
+  tenant   Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  message  OutreachMessage @relation(fields: [messageId], references: [id])
+  lead     Lead            @relation(fields: [leadId], references: [id])
+
+  @@index([tenantId])
+  @@index([tenantId, isRead])
+  @@index([tenantId, classification])
+}
+
+// ─── Suppressed Email (Opt-out list) ──────────────────────────────────────────
+model SuppressedEmail {
+  id          String   @id @default(uuid())
+  tenantId    String
+  email       String
+  reason      String   // unsubscribe | bounce | complaint | manual
+  suppressedAt DateTime @default(now())
+
+  tenant  Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, email])
+  @@index([tenantId])
+}
+
+// ─── Analytics Snapshot (Cached daily rollup) ─────────────────────────────────
+model AnalyticsSnapshot {
+  id          String   @id @default(uuid())
+  tenantId    String
+  date        DateTime @db.Date
+  campaignId  String?
+
+  leadsDiscovered    Int @default(0)
+  leadsQualified     Int @default(0)
+  outreachSent       Int @default(0)
+  repliesReceived    Int @default(0)
+  positiveReplies    Int @default(0)
+  appointmentsBooked Int @default(0)
+  emailsSent         Int @default(0)
+  linkedinSent       Int @default(0)
+  instagramSent      Int @default(0)
+  bounced            Int @default(0)
+  unsubscribed       Int @default(0)
+
+  createdAt   DateTime @default(now())
+
+  @@unique([tenantId, date, campaignId])
+  @@index([tenantId, date])
+}
+
+// ─── Notification ─────────────────────────────────────────────────────────────
+model Notification {
+  id          String   @id @default(uuid())
+  tenantId    String
+  userId      String?
+  type        String   // reply | appointment | campaign | lead | system
+  title       String
+  message     String
+  link        String?
+  read        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, read])
+}
+
+// ─── API Key (for platform integrations) ──────────────────────────────────────
+model ApiKey {
+  id          String   @id @default(uuid())
+  tenantId    String
+  name        String
+  keyHash     String   @unique // bcrypt hash of the key
+  keyPreview  String   // first 8 chars for display
+  scopes      String[]
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId])
+}
